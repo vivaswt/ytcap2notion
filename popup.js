@@ -24,7 +24,7 @@ document.addEventListener("DOMContentLoaded", () => {
     chrome.storage.sync.set({ notionApiKey: apiKey, notionDbId: dbId });
 
     saveBtn.disabled = true;
-    showStatus("Checking YouTube page...", "");
+    showStatus("Automating clicks... (this may take a few seconds)", "");
 
     try {
       // Get the currently active tab
@@ -33,12 +33,10 @@ document.addEventListener("DOMContentLoaded", () => {
         throw new Error("Please open a specific YouTube video page.");
       }
 
-      showStatus("Extracting transcript from DOM...", "");
-
-      // Execute DOM extraction inside the active YouTube page
+      // Execute DOM automation & extraction inside the active YouTube page
       const [injectionResult] = await chrome.scripting.executeScript({
         target: { tabId: tab.id },
-        func: extractTranscriptFromDOM
+        func: automateAndExtractTranscript
       });
 
       const result = injectionResult?.result;
@@ -46,10 +44,8 @@ document.addEventListener("DOMContentLoaded", () => {
         throw new Error("Failed to read data from the page.");
       }
 
-      if (!result.transcript) {
-        throw new Error(
-          "Transcript panel not found! Please open the 'Transcript' section on YouTube first."
-        );
+      if (result.error) {
+         throw new Error(result.error);
       }
 
       showStatus("Sending to Notion...", "");
@@ -73,26 +69,58 @@ document.addEventListener("DOMContentLoaded", () => {
 
 /**
  * Executes directly within YouTube's DOM context.
- * Collects only the text content (ignoring all timestamps).
+ * Clicks the necessary buttons, waits for loading, and extracts the text.
  */
-function extractTranscriptFromDOM() {
-  const segmentElements = document.querySelectorAll(
-    "ytd-transcript-segment-renderer, transcript-segment-view-model"
-  );
+async function automateAndExtractTranscript() {
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const getSegments = () => document.querySelectorAll("ytd-transcript-segment-renderer, transcript-segment-view-model");
+  
+  let segments = getSegments();
 
-  if (!segmentElements || segmentElements.length === 0) {
-    return { title: document.title, transcript: null };
+  // 1. If transcript is not already open, automate the clicks
+  if (segments.length === 0) {
+    // Step A: Find the "...more" button and click it
+    // Note: We check offsetParent to ensure the button is actually visible
+    const expandBtn = document.querySelector("ytd-text-inline-expander #expand");
+    if (expandBtn && expandBtn.offsetParent !== null) {
+      expandBtn.click();
+      await sleep(500); // Wait half a second for the description box to expand
+    }
+
+    // Step B: Find the "Show transcript" button and click it
+    // First, try finding it via YouTube's component tag (works regardless of language)
+    let transcriptBtn = document.querySelector("ytd-video-description-transcript-section-renderer button");
+    
+    // Fallback: search all buttons for the text (in case YouTube's component structure changed)
+    if (!transcriptBtn) {
+      const allButtons = Array.from(document.querySelectorAll("button"));
+      transcriptBtn = allButtons.find((b) => b.textContent.toLowerCase().includes("show transcript"));
+    }
+
+    if (transcriptBtn) {
+      transcriptBtn.click();
+      
+      // Step C: Poll the DOM up to 10 times (5 seconds max) for segments to load
+      for (let i = 0; i < 10; i++) {
+        await sleep(500);
+        segments = getSegments();
+        if (segments.length > 0) break;
+      }
+    }
   }
 
+  // 2. If it's STILL empty after automating clicks and waiting, return an error
+  if (segments.length === 0) {
+    return { 
+       error: "Could not open the transcript panel automatically. It might not exist for this video." 
+    };
+  }
+
+  // 3. Extract text from the segments (ignoring timestamps)
   const textSnippets = [];
-
-  segmentElements.forEach((segment) => {
-    // Extract only text content, omitting the timestamp elements completely
-    const textEl = segment.querySelector(
-      ".segment-text, span.ytAttributedStringHost[role='text'], [class*='segment-text']"
-    );
+  segments.forEach((segment) => {
+    const textEl = segment.querySelector(".segment-text, span.ytAttributedStringHost[role='text'], [class*='segment-text']");
     const text = textEl ? textEl.textContent.trim() : "";
-
     if (text) {
       textSnippets.push(text);
     }
@@ -106,7 +134,6 @@ function extractTranscriptFromDOM() {
 
   return {
     title: cleanTitle,
-    // Join with spaces to create natural, fluent text
     transcript: textSnippets.join(" ").replace(/\s+/g, " ").trim()
   };
 }
@@ -115,8 +142,6 @@ function extractTranscriptFromDOM() {
  * Sends page data and chunked transcript text to the Notion API.
  */
 async function sendToNotion(apiKey, databaseId, title, url, transcript) {
-  // Notion limits text blocks to 2,000 characters.
-  // We split by words into ~1,800-character chunks so sentences aren't cut mid-word.
   const CHUNK_LIMIT = 1800;
   const childrenBlocks = [];
   const words = transcript.split(" ");
@@ -132,7 +157,6 @@ async function sendToNotion(apiKey, databaseId, title, url, transcript) {
       currentChunk = currentChunk ? `${currentChunk} ${word}` : word;
     }
 
-    // Notion allows a max of 100 block children in a single API call
     if (childrenBlocks.length >= 99) break;
   }
 
@@ -150,16 +174,8 @@ async function sendToNotion(apiKey, databaseId, title, url, transcript) {
     body: JSON.stringify({
       parent: { database_id: databaseId },
       properties: {
-        "Source": {
-          title: [
-            {
-              text: { content: title || "YouTube Video" }
-            }
-          ]
-        },
-        "URL": {
-          url: url
-        }
+        "Source": { title: [{ text: { content: title || "YouTube Video" } }] },
+        "URL": { url: url }
       },
       children: childrenBlocks
     })
@@ -167,26 +183,16 @@ async function sendToNotion(apiKey, databaseId, title, url, transcript) {
 
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}));
-    throw new Error(
-      errorData.message || `Notion API Error: HTTP ${response.status}`
-    );
+    throw new Error(errorData.message || `Notion API Error: HTTP ${response.status}`);
   }
 }
 
-/**
- * Helper to build a Notion paragraph block object.
- */
 function createParagraphBlock(text) {
   return {
     object: "block",
     type: "paragraph",
     paragraph: {
-      rich_text: [
-        {
-          type: "text",
-          text: { content: text }
-        }
-      ]
+      rich_text: [{ type: "text", text: { content: text } }]
     }
   };
 }
