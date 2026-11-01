@@ -78,9 +78,7 @@ function addSaveButton(card) {
     chrome.runtime.sendMessage(
       {
         type: "SAVE_YOUTUBE_VIDEO_TO_NOTION",
-        videoUrl: button.dataset.videoUrl,
-        originalUrl: location.href,
-        scrollY: window.scrollY
+        videoUrl: button.dataset.videoUrl
       },
       (response) => {
         if (chrome.runtime.lastError) {

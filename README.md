@@ -10,7 +10,7 @@ A lightweight Google Chrome Extension (Manifest V3) that extracts the transcript
 - **Word-Safe Paragraph Chunking**: Automatically breaks long transcripts into readable Notion paragraph blocks without slicing words in half (respects Notion's 2,000-character block limit).
 - **Direct Notion Integration**: Calls the Notion API directly from your browser—no third-party proxy or backend server required.
 - **Credential Storage**: Saves your Notion API Key and Database ID locally in Chrome storage so you only need to enter them once.
-- **Video List Shortcut**: Adds a **Save script to Notion** icon button to each video. It opens the selected video, extracts and saves its transcript, then returns to the original YouTube page and scroll position.
+- **Video List Shortcut**: Adds a **Save script to Notion** icon button to each video. It opens the selected video in a new tab, extracts and saves its transcript, then closes the tab so the original YouTube page stays undisturbed.
 
 ---
 

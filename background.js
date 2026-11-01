@@ -4,12 +4,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type !== "SAVE_YOUTUBE_VIDEO_TO_NOTION") return false;
 
   const tabId = sender.tab?.id;
-  if (tabId === undefined) {
+  const windowId = sender.tab?.windowId;
+  if (tabId === undefined || windowId === undefined) {
     sendResponse({ accepted: false, error: "Could not identify the YouTube tab." });
     return false;
   }
 
-  saveVideoToNotion(tabId, message)
+  saveVideoToNotion(tabId, windowId, message)
     .then((result) => sendResponse(result))
     .catch((error) => {
       console.error("Could not save the YouTube video to Notion.", error);
@@ -19,9 +20,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return true;
 });
 
-async function saveVideoToNotion(tabId, message) {
-  const originalUrl = message.originalUrl;
-  const originalScrollY = message.scrollY;
+async function saveVideoToNotion(tabId, windowId, message) {
   const videoUrl = new URL(message.videoUrl);
   const videoId = videoUrl.searchParams.get("v");
 
@@ -47,11 +46,20 @@ async function saveVideoToNotion(tabId, message) {
   }
 
   let result = { success: false, message: "Could not save this video to Notion." };
-  let shouldRestore = false;
+  let processingTabId;
 
   try {
-    shouldRestore = true;
-    await navigateAndWait(tabId, videoUrl.href, (url) => {
+    const processingTab = await chrome.tabs.create({
+      url: videoUrl.href,
+      windowId,
+      active: true
+    });
+    processingTabId = processingTab.id;
+    if (processingTabId === undefined) {
+      throw new Error("Could not open a new tab for the video.");
+    }
+
+    await waitForTabComplete(processingTabId, (url) => {
       try {
         const current = new URL(url);
         return current.pathname === "/watch" && current.searchParams.get("v") === videoId;
@@ -61,7 +69,7 @@ async function saveVideoToNotion(tabId, message) {
     });
 
     const [extraction] = await chrome.scripting.executeScript({
-      target: { tabId },
+      target: { tabId: processingTabId },
       func: extractYouTubeTranscript
     });
     const data = extraction?.result;
@@ -73,24 +81,26 @@ async function saveVideoToNotion(tabId, message) {
   } catch (error) {
     result = { success: false, message: error.message || "Could not save this video to Notion." };
   } finally {
-    if (shouldRestore) {
+    if (processingTabId !== undefined) {
       try {
-        await navigateAndWait(tabId, originalUrl, (url) => url === originalUrl);
-        await chrome.scripting.executeScript({
-          target: { tabId },
-          func: (scrollY) => {
-            window.scrollTo(0, scrollY);
-            setTimeout(() => window.scrollTo(0, scrollY), 500);
-          },
-          args: [originalScrollY]
-        });
+        await chrome.tabs.remove(processingTabId);
       } catch (error) {
         result = {
           success: false,
-          message: `The video could not be saved or the original page could not be restored: ${error.message}`
+          message: `${result.message} The video tab could not be closed: ${error.message}`
         };
-        console.error("Could not restore the original YouTube page.", error);
+        console.error("Could not close the temporary YouTube tab.", error);
       }
+    }
+
+    try {
+      await chrome.tabs.update(tabId, { active: true });
+    } catch (error) {
+      result = {
+        success: false,
+        message: `${result.message} Could not return focus to the original YouTube tab: ${error.message}`
+      };
+      console.error("Could not return focus to the original YouTube tab.", error);
     }
   }
 
@@ -98,8 +108,8 @@ async function saveVideoToNotion(tabId, message) {
   return { accepted: true, ...result };
 }
 
-function navigateAndWait(tabId, targetUrl, matchesTarget) {
-  const loaded = new Promise((resolve, reject) => {
+function waitForTabComplete(tabId, matchesTarget) {
+  return new Promise((resolve, reject) => {
     const timeoutId = setTimeout(() => {
       chrome.tabs.onUpdated.removeListener(onUpdated);
       reject(new Error("Timed out while opening the YouTube page."));
@@ -113,7 +123,12 @@ function navigateAndWait(tabId, targetUrl, matchesTarget) {
     };
 
     const check = (tab) => {
-      if (tab.status === "complete" && matchesTarget(tab.url || "")) finish();
+      if (tab.status !== "complete") return;
+      try {
+        if (matchesTarget(tab.url || "")) finish();
+      } catch (error) {
+        finish(error);
+      }
     };
 
     const onUpdated = (updatedTabId, changeInfo, tab) => {
@@ -123,8 +138,6 @@ function navigateAndWait(tabId, targetUrl, matchesTarget) {
     chrome.tabs.onUpdated.addListener(onUpdated);
     chrome.tabs.get(tabId).then(check).catch(finish);
   });
-
-  return chrome.tabs.update(tabId, { url: targetUrl }).then(() => loaded);
 }
 
 async function notifyTab(tabId, success, message) {
